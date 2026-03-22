@@ -1,0 +1,417 @@
+#!/bin/bash
+#
+# rsnap-backup
+#
+# Snapshot backup script using rsync and --link-dest.
+# Each backup is a normal browseable directory. Unchanged files are
+# hard-linked from the previous backup.
+#
+# Usage:
+#     rsnap-backup /path/to/config.ini
+#
+
+set -euo pipefail
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+PROG=$(basename "$0")
+LOCK_FILE="/var/run/${PROG}.lock"
+
+BACKUP_ROOT=""
+RETENTION_DAYS=0
+KEEP_LAST_OF_MONTH="no"
+
+declare -a SOURCES=()
+declare -a EXCLUDES=()
+
+RSYNC_OPTS=(
+    -aHAX
+    --numeric-ids
+    --delete
+    --delete-excluded
+    --stats
+    --human-readable
+)
+
+usage()
+{
+    cat <<EOF
+Usage:
+    $PROG /path/to/config.ini
+EOF
+    exit 1
+}
+
+log()
+{
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+}
+
+fail()
+{
+    echo "$PROG: $*" >&2
+    exit 1
+}
+
+require_root()
+{
+    if [ "$(id -u)" -ne 0 ]
+    then
+        fail "this script should be run as root"
+    fi
+}
+
+acquire_lock()
+{
+    exec 9>"$LOCK_FILE"
+
+    if ! flock -n 9
+    then
+        fail "another backup appears to be running"
+    fi
+}
+
+trim()
+{
+    local s=$1
+
+    s=${s#"${s%%[![:space:]]*}"}
+    s=${s%"${s##*[![:space:]]}"}
+    printf '%s' "$s"
+}
+
+strip_quotes()
+{
+    local s=$1
+
+    if [[ "$s" =~ ^\".*\"$ ]]
+    then
+        s=${s:1:${#s}-2}
+    elif [[ "$s" =~ ^\'.*\'$ ]]
+    then
+        s=${s:1:${#s}-2}
+    fi
+
+    printf '%s' "$s"
+}
+
+parse_config()
+{
+    local cfg=$1
+    local section=""
+    local line key value
+
+    [ -f "$cfg" ] || fail "config file not found: $cfg"
+
+    while IFS= read -r line || [ -n "$line" ]
+    do
+        line=$(trim "$line")
+
+        [ -z "$line" ] && continue
+
+        case "$line" in
+            \#*|';'*)
+                continue
+                ;;
+        esac
+
+        if [[ "$line" =~ ^\[(.*)\]$ ]]
+        then
+            section=${BASH_REMATCH[1]}
+            section=$(trim "$section")
+            continue
+        fi
+
+        if [[ "$line" =~ ^([^=]+)=(.*)$ ]]
+        then
+            key=$(trim "${BASH_REMATCH[1]}")
+            value=$(trim "${BASH_REMATCH[2]}")
+            value=$(strip_quotes "$value")
+
+            case "$section" in
+                backup)
+                    case "$key" in
+                        root)
+                            BACKUP_ROOT=$value
+                            ;;
+                    esac
+                    ;;
+                sources)
+                    case "$key" in
+                        path)
+                            SOURCES+=("$value")
+                            ;;
+                    esac
+                    ;;
+                exclude)
+                    case "$key" in
+                        pattern)
+                            EXCLUDES+=("$value")
+                            ;;
+                    esac
+                    ;;
+                retention)
+                    case "$key" in
+                        daily_days)
+                            RETENTION_DAYS=$value
+                            ;;
+                        keep_last_of_month)
+                            KEEP_LAST_OF_MONTH=$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')
+                            ;;
+                    esac
+                    ;;
+            esac
+        fi
+    done < "$cfg"
+
+    [ -n "$BACKUP_ROOT" ] || fail "config missing [backup] root=..."
+    [ "${#SOURCES[@]}" -gt 0 ] || fail "config must contain at least one [sources] path=..."
+
+    if ! [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]]
+    then
+        fail "[retention] daily_days must be a non-negative integer"
+    fi
+
+    case "$KEEP_LAST_OF_MONTH" in
+        yes|true|1)
+            KEEP_LAST_OF_MONTH="yes"
+            ;;
+        no|false|0|"")
+            KEEP_LAST_OF_MONTH="no"
+            ;;
+        *)
+            fail "[retention] keep_last_of_month must be yes or no"
+            ;;
+    esac
+}
+
+validate_backup_root()
+{
+    [ -d "$BACKUP_ROOT" ] || fail "backup root does not exist: $BACKUP_ROOT"
+}
+
+make_work_dirs()
+{
+    mkdir -p "$BACKUP_ROOT/logs"
+}
+
+is_snapshot_name()
+{
+    local name=$1
+
+    [[ "$name" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}$ ]]
+}
+
+latest_snapshot()
+{
+    local d name
+    local latest=""
+
+    while IFS= read -r d
+    do
+        name=$(basename "$d")
+
+        if is_snapshot_name "$name"
+        then
+            latest=$d
+        fi
+    done < <(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d | sort)
+
+    printf '%s\n' "$latest"
+}
+
+make_exclude_file()
+{
+    local tmpfile=$1
+    local pattern
+
+    : > "$tmpfile"
+
+    for pattern in "${EXCLUDES[@]}"
+    do
+        printf '%s\n' "$pattern" >> "$tmpfile"
+    done
+}
+
+run_backup()
+{
+    local now snapshot_dir latest rsync_log exclude_file
+    local src rel dst link_dest
+
+    now=$(date '+%Y-%m-%d_%H-%M-%S')
+    snapshot_dir="$BACKUP_ROOT/$now"
+    rsync_log="$BACKUP_ROOT/logs/${now}.log"
+    exclude_file=$(mktemp)
+
+    make_exclude_file "$exclude_file"
+
+    latest=$(latest_snapshot || true)
+
+    mkdir -p "$snapshot_dir"
+
+    log "starting backup: $snapshot_dir"
+
+    if [ -n "${latest:-}" ]
+    then
+        log "latest prior backup: $latest"
+    else
+        log "no prior backup found; performing full backup"
+    fi
+
+    for src in "${SOURCES[@]}"
+    do
+        if [ ! -e "$src" ]
+        then
+            log "skipping missing source $src"
+            continue
+        fi
+
+        if [[ "$src" = "/" ]]
+        then
+            rm -f "$exclude_file"
+            fail "source '/' is not supported by this script; list top-level paths explicitly"
+        fi
+
+        rel=${src#/}
+        dst="$snapshot_dir/$rel"
+
+        log "backing up $src"
+
+        if [ -d "$src" ]
+        then
+            mkdir -p "$dst"
+
+            if [ -n "${latest:-}" ]
+            then
+                link_dest="$latest/$rel"
+
+                rsync \
+                    "${RSYNC_OPTS[@]}" \
+                    --link-dest="$link_dest" \
+                    --exclude-from="$exclude_file" \
+                    "$src/" "$dst/" >>"$rsync_log" 2>&1
+            else
+                rsync \
+                    "${RSYNC_OPTS[@]}" \
+                    --exclude-from="$exclude_file" \
+                    "$src/" "$dst/" >>"$rsync_log" 2>&1
+            fi
+        else
+            mkdir -p "$(dirname "$dst")"
+
+            if [ -n "${latest:-}" ]
+            then
+                link_dest="$latest/$rel"
+
+                rsync \
+                    "${RSYNC_OPTS[@]}" \
+                    --link-dest="$link_dest" \
+                    --exclude-from="$exclude_file" \
+                    "$src" "$dst" >>"$rsync_log" 2>&1
+            else
+                rsync \
+                    "${RSYNC_OPTS[@]}" \
+                    --exclude-from="$exclude_file" \
+                    "$src" "$dst" >>"$rsync_log" 2>&1
+            fi
+        fi
+    done
+
+    rm -f "$exclude_file"
+
+    log "backup complete"
+    log "rsync log: $rsync_log"
+}
+
+purge_old_backups()
+{
+    local cutoff_epoch
+    local d name ts epoch yyyymm
+    declare -a snapshots=()
+    declare -A keep_map=()
+    declare -A month_last=()
+
+    if [ "$RETENTION_DAYS" -eq 0 ] && [ "$KEEP_LAST_OF_MONTH" != "yes" ]
+    then
+        return
+    fi
+
+    cutoff_epoch=$(date -d "$RETENTION_DAYS days ago" +%s)
+
+    while IFS= read -r d
+    do
+        name=$(basename "$d")
+
+        if is_snapshot_name "$name"
+        then
+            snapshots+=("$d")
+        fi
+    done < <(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d | sort)
+
+    if [ "${#snapshots[@]}" -eq 0 ]
+    then
+        return
+    fi
+
+    for d in "${snapshots[@]}"
+    do
+        name=$(basename "$d")
+        ts="${name:0:10} ${name:11:2}:${name:14:2}:${name:17:2}"
+        epoch=$(date -d "$ts" +%s)
+
+        if [ "$epoch" -ge "$cutoff_epoch" ]
+        then
+            keep_map["$d"]=1
+        fi
+    done
+
+    if [ "$KEEP_LAST_OF_MONTH" = "yes" ]
+    then
+        for d in "${snapshots[@]}"
+        do
+            name=$(basename "$d")
+            ts="${name:0:10} ${name:11:2}:${name:14:2}:${name:17:2}"
+            epoch=$(date -d "$ts" +%s)
+
+            if [ "$epoch" -lt "$cutoff_epoch" ]
+            then
+                yyyymm=${name:0:7}
+                month_last["$yyyymm"]="$d"
+            fi
+        done
+
+        for yyyymm in "${!month_last[@]}"
+        do
+            keep_map["${month_last[$yyyymm]}"]=1
+        done
+    fi
+
+    for d in "${snapshots[@]}"
+    do
+        if [ -z "${keep_map[$d]:-}" ]
+        then
+            log "purging old backup $d"
+            rm -rf -- "$d"
+        fi
+    done
+}
+
+main()
+{
+    local cfg
+
+    [ $# -eq 1 ] || usage
+
+    cfg=$1
+
+    require_root
+    acquire_lock
+    parse_config "$cfg"
+    validate_backup_root
+    make_work_dirs
+    run_backup
+    purge_old_backups
+}
+
+main "$@"
+
