@@ -54,15 +54,15 @@ For example, if the config file contains:
 
 ```ini
 [sources]
-path=/home/blake/bin
-path=/home/blake/Stack360
+path=/home/username/Music
+path=/home/username/Documents
 ```
 
 then a snapshot may contain:
 
 ```text
-2026-03-22_13-41-45/home/blake/bin
-2026-03-22_13-41-45/home/blake/Stack360
+2026-03-22_13-41-45/home/username/Music
+2026-03-22_13-41-45/home/username/Documents
 ```
 
 On the first run, a full backup is made.
@@ -102,11 +102,11 @@ Example:
 
 ```ini
 [backup]
-root=/home/blake/backup
+root=/home/username/backup
 
 [sources]
-path=/home/blake/bin
-path=/home/blake/Stack360
+path=/home/username/Music
+path=/home/username/Documents
 
 [exclude]
 pattern=*.bak
@@ -274,12 +274,12 @@ sudo rsnap-backup /etc/rsnap.ini
 Possible output:
 
 ```text
-[2026-03-22 13:41:45] starting backup: /home/blake/backup/2026-03-22_13-41-45
-[2026-03-22 13:41:45] latest prior backup: /home/blake/backup/2026-03-21_13-30-00
-[2026-03-22 13:41:45] backing up /home/blake/bin
-[2026-03-22 13:41:45] backing up /home/blake/Stack360
+[2026-03-22 13:41:45] starting backup: /home/username/backup/2026-03-22_13-41-45
+[2026-03-22 13:41:45] latest prior backup: /home/username/backup/2026-03-21_13-30-00
+[2026-03-22 13:41:45] backing up /home/username/Documents
+[2026-03-22 13:41:45] backing up /home/username/Music
 [2026-03-22 13:41:47] backup complete
-[2026-03-22 13:41:47] rsync log: /home/blake/backup/logs/2026-03-22_13-41-45.log
+[2026-03-22 13:41:47] rsync log: /home/username/backup/logs/2026-03-22_13-41-45.log
 ```
 
 ## Suggested future improvements
