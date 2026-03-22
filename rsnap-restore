@@ -1,0 +1,246 @@
+#!/bin/bash
+#
+# rsnap-restore
+#
+# Restore selected files or directories from an rsnap-backup snapshot.
+#
+# Usage:
+#     rsnap-restore [--strip-components N] [--dest-root DIR] SNAPSHOT ABSOLUTE_PATH [ABSOLUTE_PATH ...]
+#
+# Examples:
+#     sudo rsnap-restore /backup/2026-03-22_13-41-45 /etc/hosts /home/username/bin
+#
+#     sudo rsnap-restore --dest-root /mnt/newroot \
+#         /backup/2026-03-22_13-41-45 /etc/hosts
+#
+#     sudo rsnap-restore --strip-components 2 --dest-root /mnt/newroot \
+#         /backup/2026-03-22_13-41-45 /home/username/bin
+#
+
+set -euo pipefail
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+PROG=$(basename "$0")
+
+STRIP_COMPONENTS=0
+DEST_ROOT="/"
+SNAPSHOT=""
+
+declare -a RESTORE_PATHS=()
+
+RSYNC_OPTS=(
+    -aHAX
+    --numeric-ids
+    --human-readable
+    --stats
+)
+
+usage()
+{
+    cat <<EOF
+Usage:
+    $PROG [--strip-components N] [--dest-root DIR] SNAPSHOT ABSOLUTE_PATH [ABSOLUTE_PATH ...]
+
+Restore one or more absolute paths from a snapshot.
+
+Options:
+    --strip-components N
+        Remove N leading path components from each restore path.
+
+    --dest-root DIR
+        Restore under DIR instead of /.
+
+Examples:
+    sudo $PROG /backup/2026-03-22_13-41-45 /etc/hosts /home/username/bin
+
+    sudo $PROG --dest-root /mnt/newroot \\
+        /backup/2026-03-22_13-41-45 /etc/hosts
+
+    sudo $PROG --strip-components 2 --dest-root /mnt/newroot \\
+        /backup/2026-03-22_13-41-45 /home/username/bin
+EOF
+    exit 1
+}
+
+log()
+{
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+}
+
+fail()
+{
+    echo "$PROG: $*" >&2
+    exit 1
+}
+
+require_root()
+{
+    if [ "$(id -u)" -ne 0 ]
+    then
+        fail "this script should be run as root"
+    fi
+}
+
+validate_snapshot()
+{
+    [ -d "$SNAPSHOT" ] || fail "snapshot directory not found: $SNAPSHOT"
+}
+
+normalize_dest_root()
+{
+    DEST_ROOT=${DEST_ROOT%/}
+
+    if [ -z "$DEST_ROOT" ]
+    then
+        DEST_ROOT="/"
+    fi
+
+    [ -d "$DEST_ROOT" ] || fail "destination root not found: $DEST_ROOT"
+}
+
+strip_leading_components()
+{
+    local path=$1
+    local n=$2
+    local rel remainder i
+
+    rel=${path#/}
+
+    if [ "$n" -eq 0 ]
+    then
+        printf '/%s\n' "$rel"
+        return
+    fi
+
+    remainder=$rel
+
+    for ((i = 0; i < n; i++))
+    do
+        if [[ "$remainder" != */* ]]
+        then
+            fail "cannot strip $n components from path: $path"
+        fi
+
+        remainder=${remainder#*/}
+    done
+
+    printf '/%s\n' "$remainder"
+}
+
+build_restore_target()
+{
+    local original=$1
+    local stripped
+
+    stripped=$(strip_leading_components "$original" "$STRIP_COMPONENTS")
+
+    if [ "$DEST_ROOT" = "/" ]
+    then
+        printf '%s\n' "$stripped"
+    else
+        printf '%s%s\n' "$DEST_ROOT" "$stripped"
+    fi
+}
+
+restore_one()
+{
+    local original=$1
+    local rel src target parent
+
+    [[ "$original" = /* ]] || fail "restore path must be absolute: $original"
+
+    if [[ "$original" = "/" ]]
+    then
+        fail "restoring '/' is not supported"
+    fi
+
+    rel=${original#/}
+    src="$SNAPSHOT/$rel"
+
+    [ -e "$src" ] || fail "path not found in snapshot: $original"
+
+    target=$(build_restore_target "$original")
+
+    log "restoring $original -> $target"
+
+    if [ -d "$src" ]
+    then
+        mkdir -p "$target"
+
+        rsync \
+            "${RSYNC_OPTS[@]}" \
+            "$src/" "$target/"
+    else
+        parent=$(dirname "$target")
+        mkdir -p "$parent"
+
+        rsync \
+            "${RSYNC_OPTS[@]}" \
+            "$src" "$target"
+    fi
+}
+
+parse_args()
+{
+    while [ $# -gt 0 ]
+    do
+        case "$1" in
+            --strip-components)
+                shift
+                [ $# -gt 0 ] || fail "missing value for --strip-components"
+                STRIP_COMPONENTS=$1
+                shift
+                ;;
+            --dest-root)
+                shift
+                [ $# -gt 0 ] || fail "missing value for --dest-root"
+                DEST_ROOT=$1
+                shift
+                ;;
+            --help|-h)
+                usage
+                ;;
+            --)
+                shift
+                break
+                ;;
+            -*)
+                fail "unknown option: $1"
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    if ! [[ "$STRIP_COMPONENTS" =~ ^[0-9]+$ ]]
+    then
+        fail "--strip-components must be a non-negative integer"
+    fi
+
+    [ $# -ge 2 ] || usage
+
+    SNAPSHOT=$1
+    shift
+
+    RESTORE_PATHS=("$@")
+}
+
+main()
+{
+    local p
+
+    parse_args "$@"
+    require_root
+    validate_snapshot
+    normalize_dest_root
+
+    for p in "${RESTORE_PATHS[@]}"
+    do
+        restore_one "$p"
+    done
+}
+
+main "$@"
+
