@@ -294,6 +294,3 @@ Possible enhancements include:
 - snapshot metadata file
 - automatic scheduling examples with `systemd`
 
-## License
-
-Add whatever license you prefer for this repository.
