@@ -30,6 +30,7 @@ This repository currently contains two scripts:
 - Hard-link reuse of unchanged files between snapshots
 - INI-style configuration file for backups
 - Multiple source paths
+- Optional restriction to a single filesystem per source (no crossing of mount points)
 - Exclude patterns passed to `rsync`
 - Retention policy support:
   - keep all backups from the last N days
@@ -116,6 +117,7 @@ Example:
 ```ini
 [backup]
 root=/home/username/backup
+one_file_system=no
 
 [sources]
 path=/home/username/Music
@@ -125,8 +127,8 @@ path=/home/username/Documents
 pattern=*.bak
 pattern=*.tmp
 pattern=*~
-pattern=/home/*/.cache/*
-pattern=/home/*/.local/share/Trash/*
+pattern=.cache/
+pattern=Trash/
 
 [retention]
 daily_days=30
@@ -143,12 +145,22 @@ Required.
   - the backup destination root
   - this directory must already exist
   - if it does not exist, the script exits with an error
+- `one_file_system=yes|no` (optional, default `no`)
+  - when `yes`, each source is backed up with `rsync --one-file-system` (`-x`),
+    so `rsync` does not cross filesystem boundaries while traversing that source
+  - useful when a source directory contains mount points (for example
+    `/proc`, `/sys`, `/run`, external drives, or bind mounts) that you do not
+    want to descend into
+  - accepted truthy values: `yes`, `true`, `1`; accepted falsy values:
+    `no`, `false`, `0`
+  - applies to every entry in `[sources]`
 
 Example:
 
 ```ini
 [backup]
 root=/backup/myhost
+one_file_system=yes
 ```
 
 ### `[sources]`
@@ -185,13 +197,20 @@ Examples:
 pattern=*.bak
 pattern=*.tmp
 pattern=*~
-pattern=/home/*/.cache/*
+pattern=.cache/
+pattern=Trash/
 ```
 
 Notes:
 
-- `*.bak` matches files ending in `.bak` anywhere in the tree
-- exclude patterns are passed directly to `rsync`
+- exclude patterns are passed directly to `rsync` via `--exclude-from`
+- a pattern with no `/` (or only a trailing `/`) matches a basename
+  anywhere in the source tree, e.g. `*.bak` matches every `.bak` file
+  and `.cache/` matches every directory named `.cache`
+- a pattern containing a `/` in the middle or as the first character
+  is anchored to that source's transfer root (the source path itself),
+  not to the real filesystem root; for example, with `path=/home`, the
+  pattern `/*/.cache/*` matches `/home/<user>/.cache/<anything>`
 - full-line comments beginning with `#` or `;` are allowed
 - inline comments after values are not currently supported
 

@@ -20,6 +20,7 @@ LOCK_FILE="/var/run/${PROG}.lock"
 BACKUP_ROOT=""
 RETENTION_DAYS=0
 KEEP_LAST_OF_MONTH="no"
+ONE_FILE_SYSTEM="no"
 
 declare -a SOURCES=()
 declare -a EXCLUDES=()
@@ -134,6 +135,9 @@ parse_config()
                         root)
                             BACKUP_ROOT=$value
                             ;;
+                        one_file_system)
+                            ONE_FILE_SYSTEM=$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')
+                            ;;
                     esac
                     ;;
                 sources)
@@ -181,6 +185,19 @@ parse_config()
             ;;
         *)
             fail "[retention] keep_last_of_month must be yes or no"
+            ;;
+    esac
+
+    case "$ONE_FILE_SYSTEM" in
+        yes|true|1)
+            ONE_FILE_SYSTEM="yes"
+            RSYNC_OPTS+=(--one-file-system)
+            ;;
+        no|false|0|"")
+            ONE_FILE_SYSTEM="no"
+            ;;
+        *)
+            fail "[backup] one_file_system must be yes or no"
             ;;
     esac
 }
@@ -231,6 +248,24 @@ make_exclude_file()
     do
         printf '%s\n' "$pattern" >> "$tmpfile"
     done
+}
+
+run_rsync()
+{
+    local rc=0
+
+    rsync "$@" >>"$rsync_log" 2>&1 || rc=$?
+
+    case "$rc" in
+        0)
+            ;;
+        24)
+            log "rsync: some source files vanished during transfer (exit 24); continuing"
+            ;;
+        *)
+            fail "rsync failed (exit $rc); see $rsync_log"
+            ;;
+    esac
 }
 
 run_backup()
@@ -285,16 +320,16 @@ run_backup()
             then
                 link_dest="$latest/$rel"
 
-                rsync \
+                run_rsync \
                     "${RSYNC_OPTS[@]}" \
                     --link-dest="$link_dest" \
                     --exclude-from="$exclude_file" \
-                    "$src/" "$dst/" >>"$rsync_log" 2>&1
+                    "$src/" "$dst/"
             else
-                rsync \
+                run_rsync \
                     "${RSYNC_OPTS[@]}" \
                     --exclude-from="$exclude_file" \
-                    "$src/" "$dst/" >>"$rsync_log" 2>&1
+                    "$src/" "$dst/"
             fi
         else
             mkdir -p "$(dirname "$dst")"
@@ -303,16 +338,16 @@ run_backup()
             then
                 link_dest="$latest/$rel"
 
-                rsync \
+                run_rsync \
                     "${RSYNC_OPTS[@]}" \
                     --link-dest="$link_dest" \
                     --exclude-from="$exclude_file" \
-                    "$src" "$dst" >>"$rsync_log" 2>&1
+                    "$src" "$dst"
             else
-                rsync \
+                run_rsync \
                     "${RSYNC_OPTS[@]}" \
                     --exclude-from="$exclude_file" \
-                    "$src" "$dst" >>"$rsync_log" 2>&1
+                    "$src" "$dst"
             fi
         fi
     done
