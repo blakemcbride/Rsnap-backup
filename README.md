@@ -10,9 +10,9 @@ The home for this system is:  https://github.com/blakemcbride/Rsnap-backup
 
 ## Design and implementation credit
 
-The design of this backup system is by **username**.
+The design of this backup system is by Blake McBride.
 
-The bash implementation in this repository was produced with **ChatGPT**, based on username's design requirements and then refined through iterative review and testing.
+The bash implementation in this repository was produced with **ChatGPT**, based on Blake's design requirements and then refined through iterative review and testing.
 
 ## Components
 
